@@ -32,6 +32,7 @@ class PPOAgent:
 
         with torch.no_grad():
             old_action_log_probs, old_values, _ = self.old_policy.evaluate(states, actions)
+            old_values = old_values.squeeze(-1)
             next_values = self.old_policy.forward(next_states)[1].squeeze(-1)
             values = torch.cat([old_values, next_values[-1].unsqueeze(0)], dim=0)
 

@@ -20,6 +20,10 @@ class WavefrontEnv:
         self.alpha  = alpha
         self.sigma  = noise_sigma                     # measurement noise σ
 
+        self.I_prev = 0.0
+        self.I0_mean = 0.0
+        self.I_max  = 0.0
+
         self.reset()
 
     # ------------------------------------------------------------------ utils
@@ -41,9 +45,9 @@ class WavefrontEnv:
     def reset(self):
         self.block_mask = np.ones(self.num_blocks, dtype=np.float32)   # all blocks ON
         self.phi        = np.random.rand(self.slm_dim1, self.slm_dim2) # random phase
-        self.I_max  = 0.0
         self.I_prev = self._intensity()
         self.I0_mean = self.I_prev
+        self.I_max  = self.I_prev
         return self._state()
 
     def step(self, action: int):

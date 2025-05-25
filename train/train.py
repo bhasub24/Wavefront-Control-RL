@@ -17,7 +17,6 @@ def train_ppo(env, agent, max_episodes=1000, steps_per_episode=128,
         actions = []
         rewards = []
         next_states = []
-        dones = []
         
         episode_reward = 0
         state = env.reset()
@@ -28,14 +27,13 @@ def train_ppo(env, agent, max_episodes=1000, steps_per_episode=128,
             action = agent.get_action(state)
             
             # Execute action
-            next_state, reward, done, _ = env.step(action)
+            next_state, reward = env.step(action)
             
             # Store transition
             states.append(state)
             actions.append(action)
             rewards.append(reward)
             next_states.append(next_state)
-            dones.append(done)
             
             # Update state and reward
             state = next_state
@@ -47,7 +45,7 @@ def train_ppo(env, agent, max_episodes=1000, steps_per_episode=128,
         # Update agent
         if episode % update_interval == 0:
             policy_loss, value_loss, entropy_loss = agent.update(
-                states, actions, rewards, next_states, dones
+                states, actions, rewards, next_states
             )
             
             if verbose:
