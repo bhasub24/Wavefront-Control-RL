@@ -5,11 +5,12 @@ import copy
 import numpy as np
 from torch.distributions import Categorical
 from agents.actor_critic import ActorCritic
+import torch.nn.functional as F
 
 
 # PPO Agent
 class PPOAgent:
-    def __init__(self, state_dim, action_dim, lr=3e-4, gamma=0.99, 
+    def __init__(self, state_dim, action_dim, lr=3e-4, actor_lr=3e-4, critic_lr=3e-4, gamma=0.99, 
                  clip_ratio=0.2, value_coef=0.5, entropy_coef=0.01, gae_lambda=0.95):
         self.gamma = gamma
         self.clip_ratio = clip_ratio
@@ -19,6 +20,8 @@ class PPOAgent:
         
         self.policy = ActorCritic(state_dim, action_dim)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+        self.actor_optimizer = optim.Adam(self.policy.actor_head.parameters(), lr=actor_lr)
+        self.critic_optimizer = optim.Adam(self.policy.critic_head.parameters(), lr=critic_lr)
         
         self.old_policy = copy.deepcopy(self.policy)
         self.old_policy.eval()  # Set to evaluation mode
@@ -26,9 +29,11 @@ class PPOAgent:
     def update(self, states, actions, rewards, next_states, steps_per_epoch=128, epochs=10):
         # Convert to tensors
         states = torch.FloatTensor(np.array(states))
-        actions = torch.LongTensor(np.array(actions))
+        actions = torch.FloatTensor(np.array(actions))
         rewards = torch.FloatTensor(np.array(rewards))
         next_states = torch.FloatTensor(np.array(next_states))
+
+        kl_divergences = []
 
         with torch.no_grad():
             old_action_log_probs, old_values, _ = self.old_policy.evaluate(states, actions)
@@ -78,6 +83,9 @@ class PPOAgent:
                 
                 # Calculate ratios
                 ratios = torch.exp(action_log_probs - batch_old_action_log_probs)
+
+                kl = (batch_old_action_log_probs - action_log_probs).mean().item()  
+                kl_divergences.append(kl)
                 
                 # Compute surrogate losses
                 surr1 = ratios * batch_advantages
@@ -85,21 +93,33 @@ class PPOAgent:
                 
                 # Calculate loss components
                 policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = nn.MSELoss()(values.squeeze(-1), batch_returns)
+                # value_loss = nn.MSELoss()(values.squeeze(-1), batch_returns)
+                value_loss = F.smooth_l1_loss(values.squeeze(-1), batch_returns)
                 entropy_loss = -entropy.mean()
-                
-                # Calculate total loss
-                loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
-                
-                # Perform optimization step
-                self.optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)  # Clip gradients
-                self.optimizer.step()
+
+                actor_loss = policy_loss + self.entropy_coef * entropy_loss
+                critic_loss = self.value_coef * value_loss
+
+                # Update actor and critic separately
+                self.actor_optimizer.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.actor_head.parameters(), 0.5)
+                self.actor_optimizer.step()
+
+                self.critic_optimizer.zero_grad()
+                critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.critic_head.parameters(), 0.5)
+                self.critic_optimizer.step()
+        
+        with torch.no_grad():
+            new_values = self.policy.forward(states)[1].squeeze(-1)
+
         # Update old policy
         self.old_policy.load_state_dict(self.policy.state_dict())
+
+        average_kl = np.mean(kl_divergences)
         
-        return policy_loss.item(), value_loss.item(), entropy_loss.item()
+        return policy_loss.item(), value_loss.item(), entropy_loss.item(), advantages, old_values, new_values, returns, average_kl
     
     def get_action(self, state, deterministic=False):
         return self.policy.get_action(state, deterministic)

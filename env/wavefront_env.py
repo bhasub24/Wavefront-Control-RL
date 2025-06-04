@@ -4,68 +4,92 @@ import numpy as np
 
 class WavefrontEnv:
     def __init__(self, slm_dim1=64, slm_dim2=64, eng_size=1,
-                 num_pix_per_block=32, alpha=0.3, noise_sigma=0.05):
-        # geometry -----------------------------------------------------------
+                 num_pix_per_block=32, alpha=0.3, noise_sigma=0.05, k=0.45, phi=None):
+        # geometry
         self.slm_dim1, self.slm_dim2 = slm_dim1, slm_dim2
-        self.n_pix   = slm_dim1 * slm_dim2            # 4096
-        self.eng_size = eng_size                      # up-sampling factor
+        self.n_pix   = slm_dim1 * slm_dim2            
+        self.eng_size = eng_size                      
 
-        # block grid ---------------------------------------------------------
+        # phase mask
+        if phi is None:
+            self.phi = np.random.rand(slm_dim1, slm_dim2)
+        else:
+            assert phi.shape == (slm_dim1, slm_dim2), "Phase mask shape mismatch."
+            self.phi = phi
+
+        # block grid
         self.blocks = self._make_blocks(num_pix_per_block)
-        self.num_blocks = len(self.blocks)            # 128 for 32-pix blocks
+        self.num_blocks = len(self.blocks)            
 
-        # RL bookkeeping -----------------------------------------------------
-        self.state_dim    = self.num_blocks + 1       # 128 bits + intensity
+        # RL bookkeeping
+        self.state_dim    = self.num_blocks           
         self.action_space = self.num_blocks
         self.alpha  = alpha
-        self.sigma  = noise_sigma                     # measurement noise σ
-
-        self.I_prev = 0.0
+        self.sigma  = noise_sigma                     
         self.I0_mean = 0.0
         self.I_max  = 0.0
+        self.I_t   = 0.0
+
+        self.k = k
+
+        self.best_mask = None
+
+        self.set_I0_mean()
 
         self.reset()
 
-    # ------------------------------------------------------------------ utils
+    #utils
     def _make_blocks(self, p_per_block):
-        """Return list of numpy arrays – each array holds pixel indices of one block."""
+        """Return list of numpy arrays, each array holds pixel indices of one block."""
         idx = np.arange(self.n_pix)
         return [idx[k : k + p_per_block]
                 for k in range(0, self.n_pix, p_per_block)]
 
     def _blocks_to_pixels(self):
-        """Convert block-level mask → 2-D pixel mask (0/1)."""
+        """Convert block-level mask → 2-D pixel mask."""
         pixel = np.zeros(self.n_pix, dtype=np.float32)
         for bid, bit in enumerate(self.block_mask):
-            if bit:                                     # block is ON
+            if bit:                                     
                 pixel[self.blocks[bid]] = 1.0
         return pixel.reshape(self.slm_dim1, self.slm_dim2)
 
-    # ------------------------------------------------------------- RL methods
     def reset(self):
-        self.block_mask = np.ones(self.num_blocks, dtype=np.float32)   # all blocks ON
-        self.phi        = np.random.rand(self.slm_dim1, self.slm_dim2) # random phase
+        if self.best_mask is not None:
+            if np.random.rand() < 0.2:
+                self.block_mask = self.best_mask.copy()
+
+                # Flip a small number of bits randomly (e.g., 5 out of 128)
+                flip_indices = np.random.choice(self.num_blocks, size=5, replace=False)
+                for idx in flip_indices:
+                    self.block_mask[idx] = 1.0 - self.block_mask[idx]
+            else:
+                self.block_mask = self.best_mask.copy()
+        else:
+            self.block_mask = np.random.choice([0.0, 1.0], size=self.num_blocks).astype(np.float32)
+            
         self.I_prev = self._intensity()
-        self.I0_mean = self.I_prev
         self.I_max  = self.I_prev
         return self._state()
+    
+    def tanh_reward(self, I_1):
+        return np.tanh(self.k * I_1)
 
-    def step(self, action: int):
-        # flip chosen block bit
-        self.block_mask[action] = 1.0 - self.block_mask[action]
+    def step(self, action):
+        
+        for a in action:
+            self.block_mask[a] = 1.0 - self.block_mask[a]
 
-        I_t   = self._intensity()
-        delta = (I_t - self.I_prev) / self.I0_mean
-        bonus = max(0.0, I_t - self.I_max) / self.I0_mean
-        reward = delta + self.alpha * bonus - 1e-4      # small time penalty λ
-
-        # bookkeeping
-        self.I_prev = I_t
-        self.I_max  = max(self.I_max, I_t)
+        self.I_t = self._intensity()
+        reward = self.tanh_reward(self.I_t)
+         
+        # Bookkeeping best mask
+        if self.I_t > self.I_max:
+            self.I_max = self.I_t
+            self.best_mask = self.block_mask.copy()
 
         return self._state(), reward
 
-    # ---------------------------------------------------------------- optics
+    #optics
     def _intensity(self):
         mask2d = self._blocks_to_pixels()
         field  = np.exp(1j * 2 * np.pi * self.phi) * mask2d
@@ -74,7 +98,14 @@ class WavefrontEnv:
         I     += self.sigma * np.random.randn()         # additive Gaussian noise
         return float(I)
 
-    # ---------------------------------------------------------------- state
+    #state
     def _state(self):
-        norm_I = self.I_prev / self.I0_mean
-        return np.concatenate([self.block_mask, [norm_I]]).astype(np.float32)
+        return self.block_mask.astype(np.float32)
+    
+    def set_I0_mean(self):
+        for i in range(1000):
+            self.block_mask = np.random.choice([0.0, 1.0], size=self.num_blocks).astype(np.float32)
+            I = self._intensity()
+            self.I0_mean += I
+        self.I0_mean /= 1000.0
+
